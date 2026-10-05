@@ -11428,7 +11428,7 @@ pub(crate) mod tests {
         assert_eq!(result.transfer_in.account_id, "acc-usd");
         assert_eq!(result.transfer_in.currency, "USD");
         assert_eq!(result.transfer_in.amount, Some(dec!(31.20)));
-        assert_eq!(result.transfer_in.fx_rate, Some(dec!(0.0312)));
+        assert_eq!(result.transfer_in.fx_rate, None);
         assert_eq!(
             result.transfer_out.source_group_id,
             result.transfer_in.source_group_id
@@ -11473,8 +11473,8 @@ pub(crate) mod tests {
                 activity_date: "2026-06-03T20:20:00Z".to_string(),
                 source_amount: Some(dec!(100)),
                 destination_amount: Some(dec!(90)),
-                source_currency: "USD".to_string(),
-                destination_currency: "USD".to_string(),
+                source_currency: "HKD".to_string(),
+                destination_currency: "HKD".to_string(),
                 fx_rate: Some(dec!(0.9)),
                 notes: None,
                 transfer_mode: Some("cash".to_string()),
@@ -11484,6 +11484,8 @@ pub(crate) mod tests {
 
         assert_eq!(result.transfer_out.amount, Some(dec!(100)));
         assert_eq!(result.transfer_in.amount, Some(dec!(100)));
+        assert_eq!(result.transfer_out.currency, "HKD");
+        assert_eq!(result.transfer_in.currency, "HKD");
         assert_eq!(result.transfer_in.fx_rate, None);
     }
 
@@ -11570,6 +11572,252 @@ pub(crate) mod tests {
         assert_eq!(updated.transfer_out.fee, Some(dec!(3)));
         assert_eq!(updated.transfer_in.fee, Some(dec!(2)));
         assert_eq!(updated.transfer_out.fx_rate, Some(dec!(2)));
+    }
+
+    fn independent_transfer_fixture() -> (
+        ActivityService,
+        Arc<MockActivityRepository>,
+        InternalTransferPairRequest,
+    ) {
+        let accounts = Arc::new(MockAccountService::new());
+        accounts.add_account(create_test_account("from", "USD"));
+        accounts.add_account(create_test_account("to", "USD"));
+        accounts.add_account(create_test_account("other", "EUR"));
+        let repository = Arc::new(MockActivityRepository::new());
+        let service = ActivityService::new(
+            repository.clone(),
+            accounts,
+            Arc::new(MockAssetService::new()),
+            Arc::new(MockFxService::new()),
+            Arc::new(MockQuoteService),
+        );
+        let request = InternalTransferPairRequest {
+            transfer_out_id: None,
+            transfer_in_id: None,
+            source_group_id: None,
+            from_account_id: "from".into(),
+            to_account_id: "to".into(),
+            activity_date: "2026-06-03T20:20:00Z".into(),
+            source_amount: Some(dec!(780)),
+            destination_amount: Some(dec!(100)),
+            source_currency: "HKD".into(),
+            destination_currency: "USD".into(),
+            fx_rate: Some(dec!(99)),
+            notes: None,
+            transfer_mode: Some("cash".into()),
+        };
+        (service, repository, request)
+    }
+
+    #[tokio::test]
+    async fn independent_cash_transfer_normalizes_units_and_uses_amounts_without_balance_checks() {
+        for (source, destination, expected_source, expected_amount) in [
+            ("HKD", "USD", "HKD", dec!(780)),
+            ("USD", "HKD", "USD", dec!(780)),
+            ("HKD", "EUR", "HKD", dec!(780)),
+            ("GBp", "USD", "GBP", dec!(7.8)),
+            ("GBX", "GBP", "GBP", dec!(7.8)),
+            ("POINTS", "USD", "POINTS", dec!(780)),
+        ] {
+            let (service, repository, mut request) = independent_transfer_fixture();
+            request.source_currency = source.into();
+            request.destination_currency = destination.into();
+            let saved = service.save_internal_transfer_pair(request).await.unwrap();
+            assert_eq!(saved.transfer_out.currency, expected_source);
+            assert_eq!(saved.transfer_out.amount, Some(expected_amount));
+            assert_eq!(
+                saved.transfer_in.amount,
+                Some(if expected_source == destination {
+                    expected_amount
+                } else {
+                    dec!(100)
+                })
+            );
+            assert!(saved.transfer_out.fx_rate.is_none());
+            assert!(saved.transfer_in.fx_rate.is_none());
+            // There are no deposits, balances or market quotes in this fixture.
+            assert_eq!(repository.get_activities().unwrap().len(), 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn independent_cash_transfer_preserves_valuation_overrides_until_their_pair_changes() {
+        let (service, repository, mut request) = independent_transfer_fixture();
+        let created = service
+            .save_internal_transfer_pair(request.clone())
+            .await
+            .unwrap();
+        for row in repository.activities.lock().unwrap().iter_mut() {
+            row.fx_rate = Some(dec!(0.125));
+        }
+        request.transfer_out_id = Some(created.transfer_out.id);
+        request.transfer_in_id = Some(created.transfer_in.id);
+        request.notes = Some("notes only".into());
+        let unchanged = service
+            .save_internal_transfer_pair(request.clone())
+            .await
+            .unwrap();
+        assert_eq!(unchanged.transfer_out.fx_rate, Some(dec!(0.125)));
+        assert_eq!(unchanged.transfer_in.fx_rate, Some(dec!(0.125)));
+        assert_eq!(unchanged.transfer_in.amount, Some(dec!(100)));
+        request.source_currency = "GBP".into();
+        request.to_account_id = "other".into();
+        let changed = service.save_internal_transfer_pair(request).await.unwrap();
+        assert!(changed.transfer_out.fx_rate.is_none());
+        assert!(changed.transfer_in.fx_rate.is_none());
+    }
+
+    #[tokio::test]
+    async fn independent_cash_transfer_rejects_single_and_explicit_bulk_currency_changes_atomically(
+    ) {
+        let (service, repository, request) = independent_transfer_fixture();
+        let created = service.save_internal_transfer_pair(request).await.unwrap();
+        for account_change in [false, true] {
+            let mut outgoing =
+                create_test_activity_update(&created.transfer_out.id, "from", None, "HKD");
+            outgoing.activity_type = "TRANSFER_OUT".into();
+            if account_change {
+                outgoing.account_id = "other".into();
+            } else {
+                outgoing.currency = "EUR".into();
+            }
+            assert!(service
+                .update_activity(outgoing.clone())
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("pair editor"));
+            let mut incoming =
+                create_test_activity_update(&created.transfer_in.id, "to", None, "USD");
+            incoming.activity_type = "TRANSFER_IN".into();
+            incoming.amount = Some(Some(dec!(123)));
+            let result = service
+                .bulk_mutate_activities(ActivityBulkMutationRequest {
+                    creates: vec![],
+                    updates: vec![outgoing, incoming],
+                    delete_ids: vec![],
+                })
+                .await
+                .unwrap();
+            assert!(!result.errors.is_empty());
+            assert!(result.updated.is_empty());
+        }
+        assert_eq!(
+            repository
+                .get_activity(&created.transfer_in.id)
+                .unwrap()
+                .amount,
+            Some(dec!(100))
+        );
+        assert_eq!(
+            repository
+                .get_activity(&created.transfer_out.id)
+                .unwrap()
+                .currency,
+            "HKD"
+        );
+    }
+
+    #[tokio::test]
+    async fn independent_cash_transfer_amount_edits_ignore_valuation_rates_and_preserve_explicit_legs(
+    ) {
+        let (service, repository, request) = independent_transfer_fixture();
+        let created = service.save_internal_transfer_pair(request).await.unwrap();
+        for row in repository.activities.lock().unwrap().iter_mut() {
+            row.fx_rate = Some(dec!(7.8));
+        }
+        let mut outgoing =
+            create_test_activity_update(&created.transfer_out.id, "from", None, "HKD");
+        outgoing.activity_type = "TRANSFER_OUT".into();
+        outgoing.amount = Some(Some(dec!(1560)));
+        service.update_activity(outgoing.clone()).await.unwrap();
+        assert_eq!(
+            repository
+                .get_activity(&created.transfer_in.id)
+                .unwrap()
+                .amount,
+            Some(dec!(200))
+        );
+        let mut incoming = create_test_activity_update(&created.transfer_in.id, "to", None, "USD");
+        incoming.activity_type = "TRANSFER_IN".into();
+        incoming.amount = Some(Some(dec!(200)));
+        incoming.fx_rate = Some(Some(dec!(123)));
+        service.update_activity(incoming.clone()).await.unwrap();
+        assert_eq!(
+            repository
+                .get_activity(&created.transfer_out.id)
+                .unwrap()
+                .amount,
+            Some(dec!(1560))
+        );
+        incoming.amount = Some(Some(dec!(50)));
+        service.update_activity(incoming.clone()).await.unwrap();
+        assert_eq!(
+            repository
+                .get_activity(&created.transfer_out.id)
+                .unwrap()
+                .amount,
+            Some(dec!(390))
+        );
+        outgoing.amount = Some(Some(dec!(2000)));
+        incoming.amount = Some(Some(dec!(300)));
+        let result = service
+            .bulk_mutate_activities(ActivityBulkMutationRequest {
+                creates: vec![],
+                updates: vec![outgoing, incoming],
+                delete_ids: vec![],
+            })
+            .await
+            .unwrap();
+        assert!(result.errors.is_empty());
+        assert_eq!(
+            repository
+                .get_activity(&created.transfer_out.id)
+                .unwrap()
+                .amount,
+            Some(dec!(2000))
+        );
+        assert_eq!(
+            repository
+                .get_activity(&created.transfer_in.id)
+                .unwrap()
+                .amount,
+            Some(dec!(300))
+        );
+    }
+
+    #[tokio::test]
+    async fn independent_cash_transfer_invalid_legacy_amount_does_not_partially_update() {
+        let (service, repository, request) = independent_transfer_fixture();
+        let created = service.save_internal_transfer_pair(request).await.unwrap();
+        repository
+            .activities
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|row| row.id == created.transfer_out.id)
+            .unwrap()
+            .amount = Some(Decimal::ZERO);
+        let mut update = create_test_activity_update(&created.transfer_out.id, "from", None, "HKD");
+        update.activity_type = "TRANSFER_OUT".into();
+        update.amount = Some(Some(dec!(1000)));
+        let result = service
+            .bulk_mutate_activities(ActivityBulkMutationRequest {
+                creates: vec![],
+                updates: vec![update],
+                delete_ids: vec![],
+            })
+            .await
+            .unwrap();
+        assert_eq!(result.errors.len(), 1);
+        assert!(result.updated.is_empty());
+        assert_eq!(
+            repository
+                .get_activity(&created.transfer_in.id)
+                .unwrap()
+                .amount,
+            Some(dec!(100))
+        );
     }
 
     #[tokio::test]
@@ -11720,7 +11968,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn bulk_cross_currency_pair_amount_update_without_fx_returns_error() {
+    async fn bulk_cross_currency_pair_amount_update_uses_existing_amounts_without_fx() {
         let account_service = Arc::new(MockAccountService::new());
         let asset_service = Arc::new(MockAssetService::new());
         let fx_service = Arc::new(MockFxService::new());
@@ -11765,11 +12013,14 @@ pub(crate) mod tests {
             .await
             .expect("bulk mutation should return structured errors");
 
-        assert!(result.updated.is_empty());
-        assert_eq!(result.errors.len(), 1);
-        assert!(result.errors[0]
-            .message
-            .contains("Cross-currency transfer amount updates require a valid FX rate"));
+        assert!(result.errors.is_empty());
+        assert_eq!(result.updated.len(), 2);
+        let incoming = result
+            .updated
+            .iter()
+            .find(|row| row.id == "transfer-in")
+            .unwrap();
+        assert_eq!(incoming.amount, Some(dec!(107.8)));
     }
 
     #[tokio::test]

@@ -828,6 +828,8 @@ pub struct InternalTransferPairRequest {
     pub destination_amount: Option<Decimal>,
     pub source_currency: String,
     pub destination_currency: String,
+    /// Legacy execution-rate hint. Amounts are authoritative; this is never
+    /// persisted as Activity.fx_rate (an activity-to-account valuation override).
     #[serde(
         default,
         deserialize_with = "decimal_input_format::deserialize_option_decimal"

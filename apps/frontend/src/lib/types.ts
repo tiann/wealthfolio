@@ -380,6 +380,10 @@ export interface InternalTransferPairRequest {
   destinationAmount: string | number;
   sourceCurrency: string;
   destinationCurrency: string;
+  /** @deprecated Execution-rate hint accepted for compatibility; cash amounts are authoritative.
+   * Never stored in Activity.fxRate (the activity-to-account valuation override).
+   * Derive the transfer rate from destinationAmount / sourceAmount instead.
+   */
   fxRate?: string | number | null;
   notes?: string | null;
   transferMode?: "cash";

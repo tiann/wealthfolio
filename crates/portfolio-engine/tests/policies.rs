@@ -16,6 +16,41 @@ fn scenario(yaml: &str) -> Pipeline {
     Pipeline::run(scenario.raw_facts()).expect("pipeline")
 }
 
+#[test]
+fn internal_cash_transfers_book_actual_currencies_and_value_them_independently() {
+    let pipeline = scenario(
+        r#"
+id: POLICY-TRANSFER-CURRENCIES
+policy: { base_currency: USD, timezone: UTC, as_of: 2025-01-06 }
+accounts:
+  - { id: a, currency: USD }
+  - { id: b, currency: USD }
+activities:
+  - { id: dep-usd, account: a, type: DEPOSIT, date: 2025-01-02T10:00:00Z, currency: USD, amount: 1000 }
+  - { id: dep-hkd, account: a, type: DEPOSIT, date: 2025-01-02T11:00:00Z, currency: HKD, amount: 1000 }
+  - { id: out-hkd, account: a, type: TRANSFER_OUT, date: 2025-01-03T10:00:00Z, currency: HKD, amount: 500, source_group_id: same }
+  - { id: in-hkd, account: b, type: TRANSFER_IN, date: 2025-01-03T10:00:00Z, currency: HKD, amount: 500, source_group_id: same }
+  - { id: out-usd, account: a, type: TRANSFER_OUT, date: 2025-01-06T10:00:00Z, currency: USD, amount: 100, source_group_id: cross }
+  - { id: in-fx, account: b, type: TRANSFER_IN, date: 2025-01-06T10:00:00Z, currency: HKD, amount: 800, source_group_id: cross }
+fx_rates:
+  - { from: HKD, to: USD, day: 2025-01-02, rate: 0.125 }
+  - { from: HKD, to: USD, day: 2025-01-03, rate: 0.125 }
+  - { from: HKD, to: USD, day: 2025-01-06, rate: 0.125 }
+"#,
+    );
+    let a = &pipeline.bundle.final_state.accounts[&AccountId::new("a")];
+    let b = &pipeline.bundle.final_state.accounts[&AccountId::new("b")];
+    let hkd = Currency::parse("HKD").unwrap();
+    let usd = Currency::parse("USD").unwrap();
+    assert_eq!(a.cash[&usd], Decimal::from(900));
+    assert_eq!(a.cash[&hkd], Decimal::from(500));
+    assert_eq!(b.cash[&hkd], Decimal::from(1300));
+    assert_eq!(b.cash.get(&usd).copied().unwrap_or_default(), Decimal::ZERO);
+    // The implied execution rate is 8 HKD/USD, NOT the HKD->USD valuation rate.
+    assert_eq!(b.net_contribution, Decimal::new(1625, 1));
+    assert_eq!(a.net_contribution + b.net_contribution, Decimal::from(1125));
+}
+
 fn rate(from: &str, to: &str, day: &str, rate: Decimal) -> RawFxRate {
     RawFxRate {
         from: from.to_string(),
