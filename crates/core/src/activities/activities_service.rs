@@ -122,6 +122,45 @@ struct ResolvedSymbolInfo {
     exchange_mic: Option<String>,
 }
 
+/// What an update makes of a transfer leg when it turns it into a securities
+/// transfer: its direction, the security and the quantity moved.
+struct SecuritiesTransferLeg {
+    activity_type: String,
+    asset: String,
+    quantity: Decimal,
+}
+
+impl SecuritiesTransferLeg {
+    fn from_update(update: &ActivityUpdate) -> Option<Self> {
+        let asset_input = update.asset.as_ref()?;
+        let asset = asset_input
+            .id
+            .as_deref()
+            .or(asset_input.symbol.as_deref())
+            .map(str::trim)
+            .filter(|asset| !asset.is_empty())?;
+        if !is_securities_transfer(&update.activity_type, Some(asset)) {
+            return None;
+        }
+        let quantity = update
+            .quantity
+            .flatten()
+            .filter(|quantity| !quantity.is_zero())?;
+        Some(Self {
+            activity_type: update.activity_type.clone(),
+            asset: asset.to_uppercase(),
+            quantity: quantity.abs(),
+        })
+    }
+
+    /// Whether the two legs are the opposite sides of one securities transfer.
+    fn pairs_with(&self, other: &Self) -> bool {
+        self.activity_type != other.activity_type
+            && self.asset == other.asset
+            && self.quantity == other.quantity
+    }
+}
+
 struct InternalPairValues {
     source_amount: Decimal,
     destination_amount: Decimal,
@@ -5072,6 +5111,13 @@ impl ActivityServiceTrait for ActivityService {
             .iter()
             .map(|update| update.id.clone())
             .collect();
+        let securities_legs: HashMap<String, SecuritiesTransferLeg> = request
+            .updates
+            .iter()
+            .filter_map(|update| {
+                SecuritiesTransferLeg::from_update(update).map(|leg| (update.id.clone(), leg))
+            })
+            .collect();
         let mut update_requests: Vec<ActivityUpdate> = Vec::new();
         for update_request in request.updates {
             match self.activity_repository.get_activity(&update_request.id) {
@@ -5079,23 +5125,32 @@ impl ActivityServiceTrait for ActivityService {
                     if let Some(pair) =
                         self.load_internal_transfer_pair_for_activity(&update_request.id)?
                     {
-                        if let Err(err) = Self::validate_internal_cash_pair_currency_update(
-                            &update_request,
-                            &existing,
-                            &pair,
-                        ) {
-                            errors.push(ActivityBulkMutationError {
-                                id: Some(update_request.id.clone()),
-                                action: "update".to_string(),
-                                message: err.to_string(),
-                            });
-                            continue;
-                        }
                         let counterpart_id = if existing.id == pair.transfer_in.id {
                             pair.transfer_out.id.clone()
                         } else {
                             pair.transfer_in.id.clone()
                         };
+                        // The pair editor converts a cash pair to a securities
+                        // transfer by updating both legs together; that is a
+                        // complete pair edit, not a single-leg one.
+                        let converts_pair_to_securities = securities_legs
+                            .get(&update_request.id)
+                            .zip(securities_legs.get(&counterpart_id))
+                            .is_some_and(|(leg, counterpart)| leg.pairs_with(counterpart));
+                        if !converts_pair_to_securities {
+                            if let Err(err) = Self::validate_internal_cash_pair_currency_update(
+                                &update_request,
+                                &existing,
+                                &pair,
+                            ) {
+                                errors.push(ActivityBulkMutationError {
+                                    id: Some(update_request.id.clone()),
+                                    action: "update".to_string(),
+                                    message: err.to_string(),
+                                });
+                                continue;
+                            }
+                        }
 
                         if !explicit_update_ids.contains(&counterpart_id) {
                             match self.build_counterpart_update(&update_request, &existing, &pair) {

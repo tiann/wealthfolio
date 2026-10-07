@@ -11719,6 +11719,93 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn pair_editor_converts_a_cash_pair_to_a_securities_transfer_in_one_bulk_update() {
+        let accounts = Arc::new(MockAccountService::new());
+        accounts.add_account(create_test_account("from", "USD"));
+        accounts.add_account(create_test_account("to", "USD"));
+        accounts.add_account(create_test_account("other", "EUR"));
+        let assets = Arc::new(MockAssetService::new());
+        assets.add_asset(create_test_asset("asset-aapl", "USD"));
+        let repository = Arc::new(MockActivityRepository::new());
+        let service = ActivityService::new(
+            repository.clone(),
+            accounts,
+            assets,
+            Arc::new(MockFxService::new()),
+            Arc::new(MockQuoteService),
+        );
+        // A cash pair in a currency neither account uses, which only the new
+        // independent currencies allow.
+        let (_, _, request) = independent_transfer_fixture();
+        let created = service
+            .save_internal_transfer_pair(InternalTransferPairRequest {
+                destination_currency: "HKD".into(),
+                destination_amount: Some(dec!(780)),
+                ..request
+            })
+            .await
+            .unwrap();
+
+        // The pair editor's securities save: both legs, in their account
+        // currencies, with the incoming leg moved to another account.
+        let securities_leg = |id: &str, account: &str, currency: &str, activity_type: &str| {
+            let mut update = create_test_activity_update(
+                id,
+                account,
+                Some(AssetResolutionInput {
+                    id: Some("asset-aapl".into()),
+                    ..Default::default()
+                }),
+                currency,
+            );
+            update.activity_type = activity_type.into();
+            update.quantity = Some(Some(dec!(10)));
+            update
+        };
+        let result = service
+            .bulk_mutate_activities(ActivityBulkMutationRequest {
+                creates: vec![],
+                updates: vec![
+                    securities_leg(&created.transfer_out.id, "from", "USD", "TRANSFER_OUT"),
+                    securities_leg(&created.transfer_in.id, "other", "EUR", "TRANSFER_IN"),
+                ],
+                delete_ids: vec![],
+            })
+            .await
+            .unwrap();
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let transfer_out = repository.get_activity(&created.transfer_out.id).unwrap();
+        let transfer_in = repository.get_activity(&created.transfer_in.id).unwrap();
+        assert_eq!(transfer_out.asset_id.as_deref(), Some("asset-aapl"));
+        assert_eq!(transfer_in.asset_id.as_deref(), Some("asset-aapl"));
+        assert_eq!(transfer_in.account_id, "other");
+        assert_eq!(transfer_in.currency, "EUR");
+
+        // A single leg is still not converted on its own.
+        let created = service
+            .save_internal_transfer_pair(InternalTransferPairRequest {
+                activity_date: "2026-06-04T20:20:00Z".into(),
+                ..independent_transfer_fixture().2
+            })
+            .await
+            .unwrap();
+        let result = service
+            .bulk_mutate_activities(ActivityBulkMutationRequest {
+                creates: vec![],
+                updates: vec![securities_leg(
+                    &created.transfer_in.id,
+                    "other",
+                    "EUR",
+                    "TRANSFER_IN",
+                )],
+                delete_ids: vec![],
+            })
+            .await
+            .unwrap();
+        assert!(result.errors[0].message.contains("pair editor"));
+    }
+
+    #[tokio::test]
     async fn independent_cash_transfer_amount_edits_ignore_valuation_rates_and_preserve_explicit_legs(
     ) {
         let (service, repository, request) = independent_transfer_fixture();
