@@ -9,6 +9,23 @@ export function getTransferRate(source?: number | null, destination?: number | n
   return Number.isFinite(rate) && rate > 0 ? rate : undefined;
 }
 
+/**
+ * The rate to calculate with. While the field still shows the rounded rate of
+ * the current amounts, the exact ratio is used, so a rounded display rate never
+ * changes cash amounts; a rate the user typed is used as typed.
+ */
+export function getCalculationRate(
+  displayRate: unknown,
+  source?: number | null,
+  destination?: number | null,
+) {
+  const rate = Number(displayRate);
+  if (!Number.isFinite(rate) || rate <= 0) return undefined;
+  return source && destination && getTransferRate(source, destination) === rate
+    ? destination / source
+    : rate;
+}
+
 /** Cash currencies are user inputs; account currencies only seed untouched new forms. */
 export function useInternalTransferCurrencies<T extends FieldValues>(
   form: UseFormReturn<T>,

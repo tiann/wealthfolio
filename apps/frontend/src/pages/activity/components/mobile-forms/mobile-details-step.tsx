@@ -33,6 +33,7 @@ import { useFormContext } from "react-hook-form";
 import { useTranslation } from "react-i18next";
 import { useAmountFormatting } from "@wealthfolio/ui";
 import {
+  getCalculationRate,
   getTransferRate,
   useInternalTransferCurrencies,
 } from "../../hooks/use-internal-transfer-currencies";
@@ -402,12 +403,16 @@ export function MobileDetailsStep({
 
   const handleSourceAmountChange = (value: number | null | undefined, isUserEdit = true) => {
     if (!isUserEdit) return;
+    const rate = getCalculationRate(
+      transferRate,
+      Number(getValues("sourceAmount" as any)),
+      Number(getValues("destinationAmount" as any)),
+    );
     setValue("sourceAmount" as any, value, { shouldDirty: true, shouldValidate: false });
     setValue("amount" as any, value, { shouldDirty: true, shouldValidate: false });
     if (!value || value <= 0) return;
     if (isCrossCurrencyInternalCash) {
-      const rate = Number(transferRate);
-      if (rate > 0) {
+      if (rate) {
         setValue("destinationAmount" as any, roundTransferValue(value * rate), {
           shouldDirty: true,
           shouldValidate: false,

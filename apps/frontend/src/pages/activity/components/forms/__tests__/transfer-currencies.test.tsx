@@ -88,4 +88,33 @@ describe("internal transfer currencies (real form)", () => {
       });
     },
   );
+
+  it("keeps cash amounts exact when the sent amount changes", async () => {
+    const onSubmit = vi.fn();
+    const { container } = render(
+      <TransferForm
+        accounts={accounts}
+        isEditing
+        onSubmit={onSubmit}
+        defaultValues={{
+          fromAccountId: "a",
+          toAccountId: "b",
+          currency: "HKD",
+          sourceCurrency: "HKD",
+          destinationCurrency: "USD",
+          sourceAmount: 78_000_000,
+          destinationAmount: 10_000_000,
+        }}
+      />,
+    );
+    fireEvent.change(screen.getByTestId("sent-amount-input"), {
+      target: { value: "156000000" },
+    });
+    fireEvent.submit(container.querySelector("form")!);
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+    expect(onSubmit.mock.calls[0][0]).toMatchObject({
+      sourceAmount: 156_000_000,
+      destinationAmount: 20_000_000,
+    });
+  });
 });

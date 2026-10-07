@@ -1,7 +1,11 @@
 import { act, renderHook } from "@/test/render";
 import { useForm } from "react-hook-form";
 import { describe, expect, it } from "vitest";
-import { getTransferRate, useInternalTransferCurrencies } from "./use-internal-transfer-currencies";
+import {
+  getCalculationRate,
+  getTransferRate,
+  useInternalTransferCurrencies,
+} from "./use-internal-transfer-currencies";
 
 interface Values {
   accountId: string;
@@ -26,6 +30,25 @@ const defaults: Values = {
   toAccountId: "b",
   sourceAmount: 780,
 };
+
+describe("getCalculationRate", () => {
+  it("calculates with the exact ratio while the field shows the rounded one", () => {
+    const rate = getCalculationRate(
+      getTransferRate(78_000_000, 10_000_000),
+      78_000_000,
+      10_000_000,
+    );
+    expect(rate).toBe(10_000_000 / 78_000_000);
+    expect(Number((156_000_000 * rate!).toFixed(6))).toBe(20_000_000);
+  });
+
+  it("uses a typed rate as typed and ignores invalid ones", () => {
+    expect(getCalculationRate(0.13, 78_000_000, 10_000_000)).toBe(0.13);
+    expect(getCalculationRate(0.13, undefined, undefined)).toBe(0.13);
+    expect(getCalculationRate(null, 780, 100)).toBeUndefined();
+    expect(getCalculationRate(0, 780, 100)).toBeUndefined();
+  });
+});
 
 describe("getTransferRate", () => {
   it("derives a display rate without making valid amounts fail positive-rate validation", () => {

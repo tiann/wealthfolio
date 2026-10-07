@@ -23,6 +23,7 @@ import { FormProvider, useForm, type Resolver } from "react-hook-form";
 import { useTranslation } from "react-i18next";
 import { z } from "zod";
 import {
+  getCalculationRate,
   getTransferRate,
   useInternalTransferCurrencies,
 } from "../../hooks/use-internal-transfer-currencies";
@@ -434,7 +435,7 @@ export function TransferForm({
     },
   });
 
-  const { watch, setValue } = form;
+  const { getValues, watch, setValue } = form;
   const isExternal = watch("isExternal");
   useActivityCurrency(form, accounts, {
     isEditing,
@@ -492,12 +493,16 @@ export function TransferForm({
 
   const handleSourceAmountChange = (value: number | null | undefined, isUserEdit = true) => {
     if (!isUserEdit) return;
+    const rate = getCalculationRate(
+      transferRate,
+      getValues("sourceAmount"),
+      getValues("destinationAmount"),
+    );
     setValue("sourceAmount", value, { shouldDirty: true, shouldValidate: false });
     setValue("amount", value, { shouldDirty: true, shouldValidate: false });
     if (!value || value <= 0) return;
     if (isCrossCurrencyInternalCash) {
-      const rate = Number(transferRate);
-      if (Number.isFinite(rate) && rate > 0) {
+      if (rate) {
         setValue("destinationAmount", roundTransferValue(value * rate), {
           shouldDirty: true,
           shouldValidate: false,
