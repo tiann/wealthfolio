@@ -1800,7 +1800,6 @@ impl ActivityService {
         existing: &Activity,
         pair: &TransferPair,
     ) -> Result<Option<ActivityUpdate>> {
-        Self::validate_internal_cash_pair_currency_update(update, existing, pair)?;
         let counterpart = if existing.id == pair.transfer_in.id {
             &pair.transfer_out
         } else if existing.id == pair.transfer_out.id {
@@ -4651,7 +4650,10 @@ impl ActivityServiceTrait for ActivityService {
 
         let pair = self.load_internal_transfer_pair_for_activity(&activity.id)?;
         let counterpart_update = match pair.as_ref() {
-            Some(pair) => self.build_counterpart_update(&activity, &existing, pair)?,
+            Some(pair) => {
+                Self::validate_internal_cash_pair_currency_update(&activity, &existing, pair)?;
+                self.build_counterpart_update(&activity, &existing, pair)?
+            }
             None => None,
         };
 
