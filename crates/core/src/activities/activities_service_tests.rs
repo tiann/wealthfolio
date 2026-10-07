@@ -11874,6 +11874,55 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_pair_with_a_stored_execution_rate_keeps_it_through_leg_edits() {
+        let (service, repository, request) = independent_transfer_fixture();
+        let created = service
+            .save_internal_transfer_pair(InternalTransferPairRequest {
+                to_account_id: "other".into(),
+                source_amount: Some(dec!(1000)),
+                destination_amount: Some(dec!(920)),
+                source_currency: "USD".into(),
+                destination_currency: "EUR".into(),
+                ..request
+            })
+            .await
+            .unwrap();
+        // Saved before independent currencies: each leg in its account's
+        // currency, with the execution rate on the incoming leg.
+        for row in repository.activities.lock().unwrap().iter_mut() {
+            if row.id == created.transfer_in.id {
+                row.fx_rate = Some(dec!(0.92));
+            }
+        }
+        let mut outgoing =
+            create_test_activity_update(&created.transfer_out.id, "from", None, "USD");
+        outgoing.activity_type = "TRANSFER_OUT".into();
+        outgoing.activity_date = "2026-06-03T20:20:00Z".into();
+        outgoing.quantity = None;
+        outgoing.unit_price = None;
+        outgoing.fee = None;
+        outgoing.amount = None;
+        outgoing.notes = Some("notes only".into());
+        service.update_activity(outgoing.clone()).await.unwrap();
+        let incoming = repository.get_activity(&created.transfer_in.id).unwrap();
+        assert_eq!(incoming.amount, Some(dec!(920)));
+        assert_eq!(incoming.fx_rate, Some(dec!(0.92)));
+        assert_eq!(
+            repository
+                .get_activity(&created.transfer_out.id)
+                .unwrap()
+                .amount,
+            Some(dec!(1000))
+        );
+
+        outgoing.amount = Some(Some(dec!(2000)));
+        service.update_activity(outgoing).await.unwrap();
+        let incoming = repository.get_activity(&created.transfer_in.id).unwrap();
+        assert_eq!(incoming.amount, Some(dec!(1840)));
+        assert_eq!(incoming.fx_rate, Some(dec!(0.92)));
+    }
+
+    #[tokio::test]
     async fn independent_cash_transfer_invalid_legacy_amount_does_not_partially_update() {
         let (service, repository, request) = independent_transfer_fixture();
         let created = service.save_internal_transfer_pair(request).await.unwrap();

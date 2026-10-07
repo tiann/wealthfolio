@@ -51,6 +51,39 @@ fx_rates:
     assert_eq!(a.net_contribution + b.net_contribution, Decimal::from(1125));
 }
 
+#[test]
+fn a_stored_transfer_rate_on_a_leg_in_its_account_currency_changes_nothing() {
+    // Pairs saved before independent transfer currencies carry the execution
+    // rate on the incoming leg. Each leg is in its account's currency, so the
+    // rate is never read: the projection and valuations match a pair without it.
+    let legacy_pair = |stored_rate: &str| {
+        scenario(&format!(
+            r#"
+id: POLICY-LEGACY-TRANSFER-RATE
+policy: {{ base_currency: USD, timezone: UTC, as_of: 2025-01-06 }}
+accounts:
+  - {{ id: a, currency: USD }}
+  - {{ id: b, currency: EUR }}
+activities:
+  - {{ id: dep, account: a, type: DEPOSIT, date: 2025-01-02T10:00:00Z, currency: USD, amount: 2000 }}
+  - {{ id: out, account: a, type: TRANSFER_OUT, date: 2025-01-03T10:00:00Z, currency: USD, amount: 1000, source_group_id: legacy }}
+  - {{ id: in, account: b, type: TRANSFER_IN, date: 2025-01-03T10:00:00Z, currency: EUR, amount: 920, source_group_id: legacy{stored_rate} }}
+fx_rates:
+  - {{ from: EUR, to: USD, day: 2025-01-02, rate: 1.08 }}
+  - {{ from: EUR, to: USD, day: 2025-01-03, rate: 1.09 }}
+  - {{ from: EUR, to: USD, day: 2025-01-06, rate: 1.1 }}
+"#
+        ))
+    };
+    let with_rate = legacy_pair(", fx_rate: 0.92");
+    let without_rate = legacy_pair("");
+    assert_eq!(
+        with_rate.bundle.final_state,
+        without_rate.bundle.final_state
+    );
+    assert_eq!(with_rate.series, without_rate.series);
+}
+
 fn rate(from: &str, to: &str, day: &str, rate: Decimal) -> RawFxRate {
     RawFxRate {
         from: from.to_string(),
