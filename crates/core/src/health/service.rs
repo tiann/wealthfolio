@@ -2212,6 +2212,8 @@ mod tests {
     ) -> Activity {
         let now = Utc.with_ymd_and_hms(2026, 6, 8, 12, 0, 0).unwrap();
         Activity {
+            destination_amount: None,
+            destination_currency: None,
             id: id.to_string(),
             account_id: account_id.to_string(),
             asset_id: None,
@@ -2298,6 +2300,8 @@ mod tests {
     fn sell_activity(id: &str, account_id: &str, asset_id: &str) -> Activity {
         let now = Utc.with_ymd_and_hms(2026, 6, 2, 2, 30, 0).unwrap();
         Activity {
+            destination_amount: None,
+            destination_currency: None,
             id: id.to_string(),
             account_id: account_id.to_string(),
             asset_id: Some(asset_id.to_string()),
@@ -2337,6 +2341,8 @@ mod tests {
     ) -> Activity {
         let now = Utc.with_ymd_and_hms(2026, 6, 1, 2, 30, 0).unwrap();
         Activity {
+            destination_amount: None,
+            destination_currency: None,
             id: id.to_string(),
             account_id: account_id.to_string(),
             asset_id: Some(asset_id.to_string()),
