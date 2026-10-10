@@ -12,8 +12,8 @@ use serde_json::Value;
 use support::*;
 use wealthfolio_portfolio_engine::model::*;
 use wealthfolio_portfolio_engine::{
-    aggregate_scope, project, project_accounts, value_window, DiagnosticCode, QuoteSurface,
-    Resolved, ResolvedSurfaces, ValueInputs, Window,
+    aggregate_scope, project, project_accounts, value_window, DiagnosticCode, EngineError,
+    QuoteSurface, Resolved, ResolvedSurfaces, ValueInputs, Window,
 };
 
 const DUST: Decimal = Decimal::from_parts(1, 0, 0, false, 8);
@@ -1053,8 +1053,14 @@ fn p_agg_scope_aggregation_is_exact() {
             ) else {
                 continue;
             };
-            let stored: Vec<DailyValuation> = own.days.iter().map(DailyValuation::stored).collect();
             let id = format!("{}: {account}", scenario.id);
+            // An account that has not started takes no part in a scope
+            // (P-IDLE).
+            if !has_started(&pipeline, account) {
+                assert!(single.days.is_empty(), "{id}: a scope of it alone");
+                continue;
+            }
+            let stored: Vec<DailyValuation> = own.days.iter().map(DailyValuation::stored).collect();
             assert_eq!(
                 single.days.len(),
                 stored.len(),
@@ -1443,6 +1449,109 @@ fn p_agg_add_an_unrelated_deposit_adds_only_itself() {
         filtered() || checked > 50,
         "only {checked} portfolios made busy"
     );
+}
+
+/// Whether `account` has started by `as_of`, from the facts alone: a
+/// transactions account has an activity, a holdings account an observed
+/// snapshot.
+fn has_started(pipeline: &Pipeline, account: &AccountId) -> bool {
+    let facts = pipeline.facts();
+    let as_of = facts.policy().as_of;
+    if facts.accounts()[account].tracking == TrackingMode::Holdings {
+        facts
+            .observed_snapshots()
+            .iter()
+            .any(|s| s.account == *account && s.date <= as_of)
+    } else {
+        facts
+            .activities()
+            .iter()
+            .any(|a| a.account == *account && a.date <= as_of)
+    }
+}
+
+/// P-STRICT: a scope never leaves out the missing history of an account that
+/// has started. With any such account's stored rows gone (a rebuild that
+/// failed or skipped it), the portfolio scope is refused, never a smaller
+/// total.
+#[test]
+fn p_strict_a_missing_history_of_a_started_account_fails_its_scope() {
+    let mut checked = 0usize;
+    for scenario in corpus() {
+        let pipeline = Pipeline::from_scenario(&scenario);
+        let effects = pipeline.effects(
+            &pipeline.bundle.disposals,
+            &pipeline.lots(),
+            &pipeline.bundle.rejected_activities(),
+        );
+        let scope = pipeline.portfolio_scope();
+        for account in &scope {
+            if !has_started(&pipeline, account) || !pipeline.series.contains_key(account) {
+                continue;
+            }
+            let mut lost = pipeline.series.clone();
+            lost.remove(account);
+            let result = aggregate_scope(&effects, &lost, &scope, Window::default());
+            assert!(
+                matches!(result, Err(EngineError::ScopeHistoryCount { .. })),
+                "{}: {account}'s missing history was left out of the portfolio",
+                scenario.id
+            );
+            checked += 1;
+        }
+    }
+    assert!(
+        filtered() || checked > 100,
+        "only {checked} histories dropped"
+    );
+}
+
+/// P-IDLE: an account that has not started changes no figure. With a
+/// transactions account without activity, one whose only activity is
+/// scheduled after `as_of`, and a holdings account without a snapshot added
+/// to the portfolio, every other account's output and every portfolio window
+/// are what they were.
+#[test]
+fn p_idle_an_account_that_has_not_started_changes_no_figure() {
+    let added = [
+        ("zz-idle", "TRANSACTIONS"),
+        ("zz-scheduled", "TRANSACTIONS"),
+        ("zz-unobserved", "HOLDINGS"),
+    ];
+    for scenario in corpus() {
+        let windows = all_windows(&scenario);
+        let reference = capture_body(&Pipeline::from_scenario(&scenario), &windows);
+        let mut idle = scenario.clone();
+        let base = &scenario.policy.base_currency;
+        for (id, mode) in added {
+            idle.accounts.push(
+                serde_yaml::from_str(&format!(
+                    "{{ id: {id}, currency: {base}, tracking_mode: {mode} }}"
+                ))
+                .unwrap(),
+            );
+        }
+        let scheduled = scenario.policy.as_of + chrono::Duration::days(3);
+        idle.activities.push(
+            serde_yaml::from_str(&format!(
+                "{{ id: zz-deposit, account: zz-scheduled, type: DEPOSIT, date: {scheduled}, amount: 100 }}"
+            ))
+            .unwrap(),
+        );
+        let mut changed = capture_body(&Pipeline::from_scenario(&idle), &windows);
+        let accounts = changed["accounts"].as_object_mut().unwrap();
+        for (id, _) in added {
+            accounts.remove(id);
+        }
+        for section in ["accounts", "portfolio", "portfolio_flows"] {
+            assert_same(
+                &scenario.id,
+                &format!("P-IDLE {section}"),
+                &changed[section],
+                &reference[section],
+            );
+        }
+    }
 }
 
 /// P-DIAG (I10): every degraded day and every silent-fallback input is

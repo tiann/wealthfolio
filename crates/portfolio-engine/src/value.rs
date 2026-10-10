@@ -225,10 +225,21 @@ fn value_series(
     series
 }
 
+/// Whether `account` has started by `as_of`, from its facts (see
+/// [`AccountProfile::started`]). Its stored rows never decide it: a started
+/// account whose rows are missing is a gap the scope must refuse (P-STRICT).
+/// An account the facts do not know is taken as started.
+pub(crate) fn has_started(effects: &Effects, account: &AccountId) -> bool {
+    effects
+        .account(account)
+        .is_none_or(|profile| profile.started)
+}
+
 /// The scoped read performance consumes (legacy
 /// `get_historical_valuations_for_accounts`): per-day sums in base currency
 /// of the accounts' stored rows, flows included, less the legs of transfer
-/// pairs whose accounts are both in scope.
+/// pairs whose accounts are both in scope. An account that has not started
+/// takes no part (a holdings account without a snapshot has no rows).
 pub fn aggregate_scope(
     effects: &Effects,
     series: &BTreeMap<AccountId, ValuationSeries>,
@@ -244,6 +255,17 @@ pub fn aggregate_scope(
             archived.as_str().to_string(),
         ));
     }
+    let label = scope
+        .iter()
+        .map(|id| id.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    let scope: Vec<AccountId> = scope
+        .iter()
+        .filter(|id| has_started(effects, id))
+        .cloned()
+        .collect();
+    let scope = scope.as_slice();
     // Stored rows inside the window, as the persisted read returns them.
     let histories: Vec<ValuationSeries> = scope
         .iter()
@@ -342,13 +364,7 @@ pub fn aggregate_scope(
     }
 
     Ok(ValuationSeries {
-        account: AccountId::new(
-            scope
-                .iter()
-                .map(|id| id.as_str())
-                .collect::<Vec<_>>()
-                .join(","),
-        ),
+        account: AccountId::new(label),
         currency: base,
         days,
         diagnostics: Vec::new(),
@@ -555,7 +571,8 @@ fn keyframes_for(
             .unwrap_or_default();
         // An account with no events has no keyframes: present its (empty)
         // final state on the range end, as one row (in a chunked run, only
-        // the last window's end is the range end).
+        // the last window's end is the range end). No stored keyframe can
+        // value it again, so `impact` refolds it whole.
         let last_window = seed.is_none() || resolved.range.end == resolved.facts.policy.as_of;
         let synthetic = (own.is_empty() && seeded.is_none() && last_window)
             .then(|| inputs.bundle.final_state.accounts.get(account_id))
@@ -1594,6 +1611,28 @@ fn priced_events(
             marked_external: marked_external.contains(event.source.as_str()),
         });
     }
+    // An account starts at its first fact on or before `as_of`: an activity,
+    // or for a holdings account an observed snapshot.
+    let as_of = facts.policy.as_of;
+    let holdings = |id: &AccountId| {
+        facts
+            .accounts
+            .get(id)
+            .is_some_and(|account| account.tracking == TrackingMode::Holdings)
+    };
+    let started: BTreeSet<&AccountId> = facts
+        .activities
+        .iter()
+        .filter(|a| a.date <= as_of && !holdings(&a.account))
+        .map(|a| &a.account)
+        .chain(
+            facts
+                .observed_snapshots
+                .iter()
+                .filter(|s| s.date <= as_of && holdings(&s.account))
+                .map(|s| &s.account),
+        )
+        .collect();
     let effects = Effects {
         base_currency: base.clone(),
         range,
@@ -1609,6 +1648,7 @@ fn priced_events(
                         kind: account.kind,
                         archived: account.archived,
                         cost_basis_method: account.cost_basis_method,
+                        started: started.contains(id),
                     },
                 )
             })
